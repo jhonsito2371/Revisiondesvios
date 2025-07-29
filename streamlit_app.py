@@ -177,7 +177,8 @@ with col2:
     conteo_revision = df_final["Revisión"].value_counts(dropna=True).reset_index()
 conteo_revision.columns = ["Estado Revisión", "Cantidad"]
 fig2 = px.bar(conteo_revision, x="Estado Revisión", y="Cantidad", title="Revisión por Estado")
-    st.plotly_chart(fig2, use_container_width=True)
+st.plotly_chart(fig2, use_container_width=True)
+
 
 # Descargar Excel
 buffer = BytesIO()
