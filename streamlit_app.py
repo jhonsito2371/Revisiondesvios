@@ -4,6 +4,9 @@ import re
 from datetime import datetime, date
 from pytz import timezone
 from io import BytesIO
+import plotly.express as px
+import smtplib
+from email.message import EmailMessage
 
 st.set_page_config(page_title="Revisión de Desvíos", page_icon="🚍", layout="wide")
 st.title("🚍 Revisión de Desvíos Operativos")
@@ -21,52 +24,27 @@ if not f_desv:
     st.info("👈 Sube al menos el **archivo de desvíos** para comenzar.")
     st.stop()
 
-# ---------- LECTURA ROBUSTA DEL ARCHIVO DE DESVÍOS ----------
+# ---------- LECTURA DEL ARCHIVO ----------
 def leer_desvios(file):
-    """
-    Intenta leer el archivo de 'acciones' crudo (con encabezados en la segunda fila).
-    Si no cuadra, intenta sin skiprows.
-    Luego normaliza a columnas estándar esperadas.
-    """
-    try_orders = [
-        {"skiprows": 1},   # formato más común en el archivo "acciones"
-        {"skiprows": 0},   # por si ya viene con encabezados en la primera fila
-    ]
+    try:
+        df = pd.read_excel(file, skiprows=1)
+    except:
+        df = pd.read_excel(file)
 
-    raw = None
-    last_err = None
-    for opts in try_orders:
-        try:
-            raw = pd.read_excel(file, engine="openpyxl", **opts)
-            break
-        except Exception as e:
-            last_err = e
-            continue
-    if raw is None:
-        raise last_err
-
-    # Si el archivo viene crudo, suele traer 16/17 columnas; renombramos a estándar
-    # Permitimos con o sin ZONA
-    if raw.shape[1] in (16, 17):
-        # Aseguramos longitud
-        cols_objetivo_16 = [
+    if df.shape[1] == 16:
+        df.columns = [
             'Fecha', 'Instante', 'Línea', 'Coche', 'Código Bus', 'Nº SAE Bus',
             'Acción', 'Descripción Acción', 'Usuario', 'Nombre Usuario', 'Puesto',
             'Parámetros', 'Motivo', 'Descripción Motivo', 'Otra Columna', 'RUTA'
         ]
-        cols_objetivo_17 = cols_objetivo_16 + ['ZONA']
-
-        if raw.shape[1] == 16:
-            raw.columns = cols_objetivo_16
-            raw["ZONA"] = ""  # si no viene ZONA, la creamos vacía
-        else:
-            raw.columns = cols_objetivo_17
-    else:
-        # Si trae otros encabezados (por ejemplo un archivo ya procesado),
-        # simplemente devolvemos lo leído para que más abajo validemos columnas.
-        pass
-
-    return raw
+        df["ZONA"] = ""
+    elif df.shape[1] == 17:
+        df.columns = [
+            'Fecha', 'Instante', 'Línea', 'Coche', 'Código Bus', 'Nº SAE Bus',
+            'Acción', 'Descripción Acción', 'Usuario', 'Nombre Usuario', 'Puesto',
+            'Parámetros', 'Motivo', 'Descripción Motivo', 'Otra Columna', 'RUTA', 'ZONA'
+        ]
+    return df
 
 try:
     df_raw = leer_desvios(f_desv)
@@ -75,36 +53,22 @@ except Exception as e:
     st.exception(e)
     st.stop()
 
-# ---------- NORMALIZACIÓN Y VALIDACIONES ----------
-# Si existe "Descripción Acción", filtramos a "Desvio"
 if "Descripción Acción" in df_raw.columns:
-    df = df_raw[df_raw["Descripción Acción"].astype(str).str.strip().str.lower() == "desvio"].copy()
+    df = df_raw[df_raw["Descripción Acción"].astype(str).str.lower() == "desvio"].copy()
 else:
     df = df_raw.copy()
 
-# Crear 'Ruta' y 'Zona' si existen o vacías
-if "RUTA" in df.columns and "Ruta" not in df.columns:
-    df["Ruta"] = df["RUTA"].astype(str).str.strip()
-if "ZONA" in df.columns and "Zona" not in df.columns:
-    df["Zona"] = df["ZONA"].astype(str).str.strip()
-if "Ruta" not in df.columns:
-    df["Ruta"] = ""
-if "Zona" not in df.columns:
-    df["Zona"] = ""
+df["Ruta"] = df["RUTA"].astype(str).str.strip()
+df["Zona"] = df["ZONA"].astype(str).str.strip()
 
-# Estado Activo/Inactivo desde 'Parámetros'
+# Estado Desvío
 if "Parámetros" in df.columns:
     df["Estado Desvío"] = df["Parámetros"].apply(
-        lambda x: "Activo" if isinstance(x, str) and (
-            'Activar="SI"' in x or 'Activo="SI"' in x or 'ACTIVAR="SI"' in x or 'ACTIVO="SI"' in x
-        ) else "Inactivo"
-    )
+        lambda x: "Activo" if isinstance(x, str) and ('Activar="SI"' in x or 'Activo="SI"' in x) else "Inactivo")
 else:
-    st.error("❌ Falta la columna **Parámetros** en el archivo de desvíos.")
-    st.write("Columnas detectadas:", list(df.columns))
     st.stop()
 
-# Extraer Código Desvío desde 'Parámetros'
+# Código Desvío
 def extraer_codigo(param):
     if isinstance(param, str):
         m = re.search(r'Desvio="(\d+)"', param)
@@ -114,26 +78,12 @@ def extraer_codigo(param):
 
 df["Código Desvío"] = df["Parámetros"].apply(extraer_codigo)
 
-# Instante = Fecha + Hora (cuando vienen separadas)
-if "Fecha" in df.columns and "Instante" in df.columns:
-    df["Instante"] = pd.to_datetime(df["Fecha"].astype(str) + " " + df["Instante"].astype(str), errors="coerce")
-elif "Instante" in df.columns:
-    df["Instante"] = pd.to_datetime(df["Instante"], errors="coerce")
-# Derivados de fecha/hora
+# Instante
+df["Instante"] = pd.to_datetime(df["Fecha"].astype(str) + " " + df["Instante"].astype(str), errors="coerce")
 df["Fecha Instante"] = df["Instante"].dt.date
 df["Hora Instante"] = df["Instante"].dt.strftime("%H:%M:%S")
 
-# Validación mínima para continuar
-requeridas = ["Instante", "Código Desvío", "Estado Desvío", "Ruta", "Zona"]
-faltantes = [c for c in requeridas if c not in df.columns]
-if faltantes:
-    st.error("❌ Faltan columnas necesarias para procesar:")
-    st.write(faltantes)
-    st.caption("Columnas detectadas:")
-    st.write(list(df.columns))
-    st.stop()
-
-# ---------- ESTADO FINAL POR CÓDIGO ----------
+# Estado Final y Estados
 def evaluar_estado(grupo):
     cantidad = len(grupo)
     estados = grupo["Estado Desvío"].unique()
@@ -149,90 +99,113 @@ def evaluar_estado(grupo):
         else:
             return "Inactivo"
 
-estado_final = df.groupby("Código Desvío", group_keys=False).apply(evaluar_estado).reset_index()
-estado_final.columns = ["Código Desvío", "Estado Final"]
-
-conteo = df["Código Desvío"].value_counts().reset_index()
-conteo.columns = ["Código Desvío", "Cantidad"]
-
-df_final = pd.merge(df, estado_final, on="Código Desvío", how="left")
-df_final = pd.merge(df_final, conteo, on="Código Desvío", how="left")
-
-# ---------- ESTADO RECIENTE + REVISIÓN ----------
 def ultimo_estado(grupo):
     return grupo.sort_values("Instante", ascending=False).iloc[0]["Estado Desvío"]
 
-estado_mas_reciente = df_final.groupby("Código Desvío").apply(ultimo_estado).reset_index()
-estado_mas_reciente.columns = ["Código Desvío", "Estados"]
-df_final = pd.merge(df_final, estado_mas_reciente, on="Código Desvío", how="left")
+df["Cantidad"] = df.groupby("Código Desvío")["Código Desvío"].transform("count")
+df["Estado Final"] = df.groupby("Código Desvío", group_keys=False).apply(evaluar_estado)
+df["Estados"] = df.groupby("Código Desvío", group_keys=False).apply(ultimo_estado)
+df["Revisión"] = df["Estados"].replace({"Activo": "Revisar", "Inactivo": "No Revisar"})
 
-df_final["Revisión"] = df_final["Estados"].replace({"Activo": "Revisar", "Inactivo": "No Revisar"})
-
-# ---------- DURACIÓN: AHORA (CO) - INSTANTE (POR FILA) ----------
-def calc_duracion_fila(instante):
-    if pd.notnull(instante):
-        ahora = datetime.now(timezone("America/Bogota")).replace(tzinfo=None)
-        return ahora - instante
-    return pd.NaT
-
-df_final["Duración Activo"] = df_final["Instante"].apply(calc_duracion_fila)
+# Duración
+ahora = datetime.now(timezone("America/Bogota")).replace(tzinfo=None)
+df["Duración Activo"] = df["Instante"].apply(lambda x: ahora - x if pd.notnull(x) else pd.NaT)
 
 def formato_duracion(td):
-    if pd.isnull(td):
-        return ""
+    if pd.isnull(td): return ""
     total = int(td.total_seconds())
     h = total // 3600
     m = (total % 3600) // 60
-    if h > 0 and m > 0:
-        return f"{h} horas {m} minutos"
-    elif h > 0:
-        return f"{h} horas"
-    elif m > 0:
-        return f"{m} minutos"
-    else:
-        return "Menos de 1 minuto"
+    if h > 0 and m > 0: return f"{h} horas {m} minutos"
+    elif h > 0: return f"{h} horas"
+    elif m > 0: return f"{m} minutos"
+    else: return "Menos de 1 minuto"
 
-df_final["Duración Activo"] = df_final["Duración Activo"].apply(formato_duracion)
+df["Duración Activo"] = df["Duración Activo"].apply(formato_duracion)
 
-# ---------- CRUCE PMT (OPCIONAL) ----------
+# PMT
 if f_pmt:
     try:
-        pmt_df = pd.read_excel(f_pmt, engine="openpyxl")
+        pmt_df = pd.read_excel(f_pmt)
         if "ID" in pmt_df.columns:
-            pmt_ids = pmt_df["ID"].astype(str).str.strip().tolist()
-            df_final["Pmt o Desvíos Nuevos"] = df_final["Código Desvío"].apply(
-                lambda x: "PMT" if str(x) in pmt_ids else "Desvío Nuevo"
-            )
+            ids = pmt_df["ID"].astype(str).tolist()
+            df["Pmt o Desvíos Nuevos"] = df["Código Desvío"].apply(lambda x: "PMT" if str(x) in ids else "Desvío Nuevo")
         else:
-            df_final["Pmt o Desvíos Nuevos"] = "Desvío Nuevo"
-            st.warning("⚠️ La base PMT no tiene columna 'ID'. Se marca todo como 'Desvío Nuevo'.")
-    except Exception as e:
-        st.warning("⚠️ No se pudo leer la base PMT. Se continúa sin cruce.")
-        st.exception(e)
-        df_final["Pmt o Desvíos Nuevos"] = "Desvío Nuevo"
+            df["Pmt o Desvíos Nuevos"] = "Desvío Nuevo"
+    except:
+        df["Pmt o Desvíos Nuevos"] = "Desvío Nuevo"
 else:
-    df_final["Pmt o Desvíos Nuevos"] = "Desvío Nuevo"
+    df["Pmt o Desvíos Nuevos"] = "Desvío Nuevo"
 
-# ---------- ORDEN FINAL Y DESCARGA ----------
-cols_finales = [
-    "Fecha Instante", "Hora Instante", "Nombre Usuario", "Código Desvío",
-    "Estado Desvío", "Estado Final", "Cantidad", "Ruta", "Zona",
-    "Pmt o Desvíos Nuevos", "Estados", "Revisión", "Duración Activo"
-]
-# Algunas columnas podrían no existir (p.ej. Nombre Usuario). Mostramos las que haya.
-cols_exist = [c for c in cols_finales if c in df_final.columns]
-df_final = df_final[cols_exist].copy()
+# ---------- FILTROS ----------
+st.sidebar.header("🔍 Filtros")
+rutas = st.sidebar.multiselect("Ruta", sorted(df["Ruta"].dropna().unique()))
+zonas = st.sidebar.multiselect("Zona", sorted(df["Zona"].dropna().unique()))
+estados = st.sidebar.multiselect("Estado Final", sorted(df["Estado Final"].dropna().unique()))
+
+filtro_df = df.copy()
+if rutas:
+    filtro_df = filtro_df[filtro_df["Ruta"].isin(rutas)]
+if zonas:
+    filtro_df = filtro_df[filtro_df["Zona"].isin(zonas)]
+if estados:
+    filtro_df = filtro_df[filtro_df["Estado Final"].isin(estados)]
 
 st.success("✅ Procesado con éxito. Vista previa:")
-st.dataframe(df_final, use_container_width=True)
+st.dataframe(filtro_df)
 
-# Descargar Excel
+# ---------- GRAFICAS ----------
+st.subheader("📊 Visualización de Datos")
+col1, col2 = st.columns(2)
+
+with col1:
+    fig1 = px.histogram(filtro_df, x="Ruta", color="Estado Final", title="Cantidad por Ruta y Estado")
+    st.plotly_chart(fig1, use_container_width=True)
+
+with col2:
+    fig2 = px.pie(filtro_df, names="Zona", title="Distribución por Zona")
+    st.plotly_chart(fig2, use_container_width=True)
+
+# ---------- DESCARGA ----------
+st.subheader("📥 Exportar")
 buffer = BytesIO()
-df_final.to_excel(buffer, index=False)
+filtro_df.to_excel(buffer, index=False)
 buffer.seek(0)
 st.download_button(
-    "📥 Descargar Excel final",
+    "📅 Descargar Excel",
     data=buffer,
-    file_name=f"Revision de desvios {date.today().strftime('%Y-%m-%d')}.xlsx",
+    file_name=f"Resumen Desvios {date.today().strftime('%Y-%m-%d')}.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
+
+# ---------- ENVÍO POR CORREO ----------
+st.subheader("📧 Enviar por correo")
+correo_destino = st.text_input("Correo de destino")
+
+if st.button("📤 Enviar resumen por correo"):
+    try:
+        emisor = "tucorreo@hotmail.com"
+        clave = "tu_contraseña"
+
+        mensaje = EmailMessage()
+        mensaje["Subject"] = f"Resumen de Desvíos Operativos - {datetime.now().strftime('%d/%m/%Y %H:%M')}"
+        mensaje["From"] = emisor
+        mensaje["To"] = correo_destino
+        mensaje.set_content("Adjunto el resumen de desvíos operativos filtrado.")
+
+        mensaje.add_attachment(
+            buffer.getvalue(),
+            maintype="application",
+            subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            filename="Resumen Desvios.xlsx"
+        )
+
+        with smtplib.SMTP("smtp.office365.com", 587) as smtp:
+            smtp.starttls()
+            smtp.login(emisor, clave)
+            smtp.send_message(mensaje)
+
+        st.success("✅ Correo enviado con éxito")
+    except Exception as e:
+        st.error(f"❌ Error al enviar el correo: {e}")
+
