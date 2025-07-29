@@ -1,3 +1,4 @@
+# streamlit_app.py
 import streamlit as st
 import pandas as pd
 import re
@@ -5,12 +6,9 @@ from datetime import datetime, date
 from pytz import timezone
 from io import BytesIO
 import plotly.express as px
-import smtplib
-from email.message import EmailMessage
 
 st.set_page_config(page_title="Revisión de Desvíos", page_icon="🚍", layout="wide")
 st.title("🚍 Revisión de Desvíos Operativos")
-
 st.markdown("Sube el archivo **de desvíos (acciones)** y la **base PMT**. El sistema detecta el formato y ajusta encabezados automáticamente.")
 
 # ---------- CARGA DE ARCHIVOS ----------
@@ -24,188 +22,125 @@ if not f_desv:
     st.info("👈 Sube al menos el **archivo de desvíos** para comenzar.")
     st.stop()
 
-# ---------- LECTURA DEL ARCHIVO ----------
+# ---------- LECTURA Y LIMPIEZA ----------
 def leer_desvios(file):
-    try:
-        df = pd.read_excel(file, skiprows=1)
-    except:
-        df = pd.read_excel(file)
-
-    if df.shape[1] == 16:
-        df.columns = [
-            'Fecha', 'Instante', 'Línea', 'Coche', 'Código Bus', 'Nº SAE Bus',
-            'Acción', 'Descripción Acción', 'Usuario', 'Nombre Usuario', 'Puesto',
-            'Parámetros', 'Motivo', 'Descripción Motivo', 'Otra Columna', 'RUTA'
-        ]
-        df["ZONA"] = ""
-    elif df.shape[1] == 17:
-        df.columns = [
-            'Fecha', 'Instante', 'Línea', 'Coche', 'Código Bus', 'Nº SAE Bus',
-            'Acción', 'Descripción Acción', 'Usuario', 'Nombre Usuario', 'Puesto',
-            'Parámetros', 'Motivo', 'Descripción Motivo', 'Otra Columna', 'RUTA', 'ZONA'
-        ]
+    for opts in [{"skiprows": 1}, {"skiprows": 0}]:
+        try:
+            df = pd.read_excel(file, engine="openpyxl", **opts)
+            break
+        except: continue
+    if df.shape[1] in (16, 17):
+        columnas = ['Fecha', 'Instante', 'Línea', 'Coche', 'Código Bus', 'Nº SAE Bus',
+                    'Acción', 'Descripción Acción', 'Usuario', 'Nombre Usuario', 'Puesto',
+                    'Parámetros', 'Motivo', 'Descripción Motivo', 'Otra Columna', 'RUTA']
+        if df.shape[1] == 17:
+            columnas.append('ZONA')
+        df.columns = columnas[:df.shape[1]]
+        if 'ZONA' not in df.columns: df['ZONA'] = ""
     return df
 
-try:
-    df_raw = leer_desvios(f_desv)
-except Exception as e:
-    st.error("❌ No se pudo leer el archivo de desvíos. Verifica que sea un .xlsx válido.")
-    st.exception(e)
-    st.stop()
-
+df_raw = leer_desvios(f_desv)
 if "Descripción Acción" in df_raw.columns:
-    df = df_raw[df_raw["Descripción Acción"].astype(str).str.lower() == "desvio"].copy()
+    df = df_raw[df_raw["Descripción Acción"].str.lower().str.strip() == "desvio"].copy()
 else:
     df = df_raw.copy()
 
-df["Ruta"] = df["RUTA"].astype(str).str.strip()
-df["Zona"] = df["ZONA"].astype(str).str.strip()
+df["Ruta"] = df.get("RUTA", "")
+df["Zona"] = df.get("ZONA", "")
+df["Estado Desvío"] = df["Parámetros"].apply(lambda x: "Activo" if isinstance(x, str) and any(s in x for s in ['Activar="SI"','Activo="SI"','ACTIVAR="SI"','ACTIVO="SI"']) else "Inactivo")
 
-# Estado Desvío
-if "Parámetros" in df.columns:
-    df["Estado Desvío"] = df["Parámetros"].apply(
-        lambda x: "Activo" if isinstance(x, str) and ('Activar="SI"' in x or 'Activo="SI"' in x) else "Inactivo")
-else:
-    st.stop()
-
-# Código Desvío
-def extraer_codigo(param):
-    if isinstance(param, str):
-        m = re.search(r'Desvio="(\d+)"', param)
-        if m:
-            return m.group(1)
+def extraer_codigo(p):
+    if isinstance(p, str):
+        m = re.search(r'Desvio="(\d+)"', p)
+        return m.group(1) if m else None
     return None
 
 df["Código Desvío"] = df["Parámetros"].apply(extraer_codigo)
-
-# Instante
 df["Instante"] = pd.to_datetime(df["Fecha"].astype(str) + " " + df["Instante"].astype(str), errors="coerce")
 df["Fecha Instante"] = df["Instante"].dt.date
 df["Hora Instante"] = df["Instante"].dt.strftime("%H:%M:%S")
 
-# Estado Final y Estados
+# ---------- ESTADOS Y REVISIÓN ----------
 def evaluar_estado(grupo):
     cantidad = len(grupo)
     estados = grupo["Estado Desvío"].unique()
-    if cantidad == 1:
-        return grupo.iloc[0]["Estado Desvío"]
-    elif cantidad == 2:
-        return grupo.sort_values("Instante", ascending=False).iloc[0]["Estado Desvío"]
-    else:
-        if "Activo" in estados and "Inactivo" in estados:
-            return "Modificado"
-        elif "Activo" in estados:
-            return "Activo"
-        else:
-            return "Inactivo"
+    if cantidad == 1: return grupo.iloc[0]["Estado Desvío"]
+    elif cantidad == 2: return grupo.sort_values("Instante", ascending=False).iloc[0]["Estado Desvío"]
+    elif "Activo" in estados and "Inactivo" in estados: return "Modificado"
+    return "Activo" if "Activo" in estados else "Inactivo"
 
-def ultimo_estado(grupo):
-    return grupo.sort_values("Instante", ascending=False).iloc[0]["Estado Desvío"]
+estado_final = df.groupby("Código Desvío", group_keys=False).apply(evaluar_estado).reset_index()
+estado_final.columns = ["Código Desvío", "Estado Final"]
+conteo = df["Código Desvío"].value_counts().reset_index()
+conteo.columns = ["Código Desvío", "Cantidad"]
 
-df["Cantidad"] = df.groupby("Código Desvío")["Código Desvío"].transform("count")
-df["Estado Final"] = df.groupby("Código Desvío", group_keys=False).apply(evaluar_estado)
-df["Estados"] = df.groupby("Código Desvío", group_keys=False).apply(ultimo_estado)
+estado_reciente = df.groupby("Código Desvío").apply(lambda g: g.sort_values("Instante", ascending=False).iloc[0]["Estado Desvío"]).reset_index()
+estado_reciente.columns = ["Código Desvío", "Estados"]
+
+# ---------- DURACIÓN ----------
+def calc_duracion(instante):
+    if pd.notnull(instante):
+        ahora = datetime.now(timezone("America/Bogota")).replace(tzinfo=None)
+        dur = ahora - instante
+        h, m = divmod(int(dur.total_seconds())//60, 60)
+        return f"{h} horas {m} minutos" if h or m else "Menos de 1 minuto"
+    return ""
+
+df = df.merge(estado_final, on="Código Desvío", how="left")
+df = df.merge(conteo, on="Código Desvío", how="left")
+df = df.merge(estado_reciente, on="Código Desvío", how="left")
 df["Revisión"] = df["Estados"].replace({"Activo": "Revisar", "Inactivo": "No Revisar"})
+df["Duración Activo"] = df["Instante"].apply(calc_duracion)
 
-# Duración
-ahora = datetime.now(timezone("America/Bogota")).replace(tzinfo=None)
-df["Duración Activo"] = df["Instante"].apply(lambda x: ahora - x if pd.notnull(x) else pd.NaT)
-
-def formato_duracion(td):
-    if pd.isnull(td): return ""
-    total = int(td.total_seconds())
-    h = total // 3600
-    m = (total % 3600) // 60
-    if h > 0 and m > 0: return f"{h} horas {m} minutos"
-    elif h > 0: return f"{h} horas"
-    elif m > 0: return f"{m} minutos"
-    else: return "Menos de 1 minuto"
-
-df["Duración Activo"] = df["Duración Activo"].apply(formato_duracion)
-
-# PMT
+# ---------- CRUCE PMT ----------
 if f_pmt:
     try:
-        pmt_df = pd.read_excel(f_pmt)
-        if "ID" in pmt_df.columns:
-            ids = pmt_df["ID"].astype(str).tolist()
-            df["Pmt o Desvíos Nuevos"] = df["Código Desvío"].apply(lambda x: "PMT" if str(x) in ids else "Desvío Nuevo")
-        else:
-            df["Pmt o Desvíos Nuevos"] = "Desvío Nuevo"
+        pmt = pd.read_excel(f_pmt, engine="openpyxl")
+        pmt_ids = pmt["ID"].astype(str).str.strip().tolist() if "ID" in pmt.columns else []
+        df["Pmt o Desvíos Nuevos"] = df["Código Desvío"].apply(lambda x: "PMT" if str(x) in pmt_ids else "Desvío Nuevo")
     except:
         df["Pmt o Desvíos Nuevos"] = "Desvío Nuevo"
 else:
     df["Pmt o Desvíos Nuevos"] = "Desvío Nuevo"
 
-# ---------- FILTROS ----------
-st.sidebar.header("🔍 Filtros")
-rutas = st.sidebar.multiselect("Ruta", sorted(df["Ruta"].dropna().unique()))
-zonas = st.sidebar.multiselect("Zona", sorted(df["Zona"].dropna().unique()))
-estados = st.sidebar.multiselect("Estado Final", sorted(df["Estado Final"].dropna().unique()))
+# ---------- FILTROS INTERACTIVOS ----------
+with st.sidebar:
+    st.header("🔍 Filtros")
+    rutas = st.multiselect("Ruta", sorted(df["Ruta"].dropna().unique().tolist()))
+    zonas = st.multiselect("Zona", sorted(df["Zona"].dropna().unique().tolist()))
+    estados = st.multiselect("Estado Final", sorted(df["Estado Final"].dropna().unique().tolist()))
 
-filtro_df = df.copy()
-if rutas:
-    filtro_df = filtro_df[filtro_df["Ruta"].isin(rutas)]
-if zonas:
-    filtro_df = filtro_df[filtro_df["Zona"].isin(zonas)]
-if estados:
-    filtro_df = filtro_df[filtro_df["Estado Final"].isin(estados)]
+filtro = (
+    (df["Ruta"].isin(rutas) if rutas else True) &
+    (df["Zona"].isin(zonas) if zonas else True) &
+    (df["Estado Final"].isin(estados) if estados else True)
+)
+df_filtrado = df[filtro]
 
-st.success("✅ Procesado con éxito. Vista previa:")
-st.dataframe(filtro_df)
+# ---------- GRÁFICAS ----------
+g1 = px.histogram(df_filtrado, x="Ruta", color="Estado Final", barmode="group", title="Desvíos por Ruta")
+g2 = px.pie(df_filtrado, names="Zona", title="Distribución por Zona")
 
-# ---------- GRAFICAS ----------
-st.subheader("📊 Visualización de Datos")
-col1, col2 = st.columns(2)
-
-with col1:
-    fig1 = px.histogram(filtro_df, x="Ruta", color="Estado Final", title="Cantidad por Ruta y Estado")
-    st.plotly_chart(fig1, use_container_width=True)
-
-with col2:
-    fig2 = px.pie(filtro_df, names="Zona", title="Distribución por Zona")
-    st.plotly_chart(fig2, use_container_width=True)
+# ---------- RESULTADOS ----------
+cols_final = [
+    "Fecha Instante", "Hora Instante", "Nombre Usuario", "Código Desvío", "Estado Desvío",
+    "Estado Final", "Cantidad", "Ruta", "Zona", "Pmt o Desvíos Nuevos", "Estados", "Revisión", "Duración Activo"
+]
+res = df_filtrado[[c for c in cols_final if c in df_filtrado.columns]].copy()
+st.success(f"✅ {len(res)} registros filtrados.")
+st.dataframe(res, use_container_width=True)
+st.plotly_chart(g1, use_container_width=True)
+st.plotly_chart(g2, use_container_width=True)
 
 # ---------- DESCARGA ----------
-st.subheader("📥 Exportar")
 buffer = BytesIO()
-filtro_df.to_excel(buffer, index=False)
+res.to_excel(buffer, index=False)
 buffer.seek(0)
 st.download_button(
-    "📅 Descargar Excel",
+    "📅 Descargar Excel filtrado",
     data=buffer,
-    file_name=f"Resumen Desvios {date.today().strftime('%Y-%m-%d')}.xlsx",
+    file_name=f"Revision de desvios {date.today()}.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
 
-# ---------- ENVÍO POR CORREO ----------
-st.subheader("📧 Enviar por correo")
-correo_destino = st.text_input("Correo de destino")
-
-if st.button("📤 Enviar resumen por correo"):
-    try:
-        emisor = "tucorreo@hotmail.com"
-        clave = "tu_contraseña"
-
-        mensaje = EmailMessage()
-        mensaje["Subject"] = f"Resumen de Desvíos Operativos - {datetime.now().strftime('%d/%m/%Y %H:%M')}"
-        mensaje["From"] = emisor
-        mensaje["To"] = correo_destino
-        mensaje.set_content("Adjunto el resumen de desvíos operativos filtrado.")
-
-        mensaje.add_attachment(
-            buffer.getvalue(),
-            maintype="application",
-            subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            filename="Resumen Desvios.xlsx"
-        )
-
-        with smtplib.SMTP("smtp.office365.com", 587) as smtp:
-            smtp.starttls()
-            smtp.login(emisor, clave)
-            smtp.send_message(mensaje)
-
-        st.success("✅ Correo enviado con éxito")
-    except Exception as e:
-        st.error(f"❌ Error al enviar el correo: {e}")
 
