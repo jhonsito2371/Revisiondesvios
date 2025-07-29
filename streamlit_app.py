@@ -1,3 +1,4 @@
+
 import streamlit as st
 import pandas as pd
 import re
@@ -136,11 +137,11 @@ with st.expander("🔎 Filtros"):
     tipos_desvio = df_final["Pmt o Desvíos Nuevos"].dropna().unique().tolist()
     rev_opciones = df_final["Revisión"].dropna().unique().tolist()
 
-    sel_ruta = st.multiselect("Filtrar por Ruta", rutas, default=rutas, key="filtro_ruta")
-    sel_zona = st.multiselect("Filtrar por Zona", zonas, default=zonas, key="filtro_zona")
-    sel_estado = st.multiselect("Filtrar por Estado Final", estados, default=estados, key="filtro_estado")
-    sel_tipo = st.multiselect("Filtrar por Tipo de Desvío", tipos_desvio, default=tipos_desvio, key="filtro_tipo")
-    sel_rev = st.multiselect("Filtrar por Revisión", rev_opciones, default=rev_opciones, key="filtro_rev")
+    sel_ruta = st.multiselect("Filtrar por Ruta", rutas, default=rutas, key="filtro_ruta_1")
+    sel_zona = st.multiselect("Filtrar por Zona", zonas, default=zonas, key="filtro_zona_1")
+    sel_estado = st.multiselect("Filtrar por Estado Final", estados, default=estados, key="filtro_estado_1")
+    sel_tipo = st.multiselect("Filtrar por Tipo de Desvío", tipos_desvio, default=tipos_desvio, key="filtro_tipo_1")
+    sel_rev = st.multiselect("Filtrar por Revisión", rev_opciones, default=rev_opciones, key="filtro_rev_1")
 
     df_final = df_final[
         df_final["Ruta"].isin(sel_ruta) &
@@ -154,9 +155,9 @@ with st.expander("🔎 Filtros"):
     zonas = df_final["Zona"].unique().tolist()
     estados = df_final["Estado Final"].unique().tolist()
 
-    sel_ruta = st.multiselect("Filtrar por Ruta", rutas, default=rutas, key="filtro_ruta")
-    sel_zona = st.multiselect("Filtrar por Zona", zonas, default=zonas, key="filtro_zona")
-    sel_estado = st.multiselect("Filtrar por Estado Final", estados, default=estados, key="filtro_estado")
+    sel_ruta = st.multiselect("Filtrar por Ruta", rutas, default=rutas, key="filtro_ruta_1")
+    sel_zona = st.multiselect("Filtrar por Zona", zonas, default=zonas, key="filtro_zona_1")
+    sel_estado = st.multiselect("Filtrar por Estado Final", estados, default=estados, key="filtro_estado_1")
 
     df_final = df_final[
         df_final["Ruta"].isin(sel_ruta) &
@@ -177,8 +178,7 @@ with col2:
     conteo_revision = df_final["Revisión"].value_counts(dropna=True).reset_index()
 conteo_revision.columns = ["Estado Revisión", "Cantidad"]
 fig2 = px.bar(conteo_revision, x="Estado Revisión", y="Cantidad", title="Revisión por Estado")
-st.plotly_chart(fig2, use_container_width=True)
-
+    st.plotly_chart(fig2, use_container_width=True)
 
 # Descargar Excel
 buffer = BytesIO()
@@ -190,5 +190,4 @@ st.download_button(
     file_name=f"Revision de desvios {date.today().strftime('%Y-%m-%d')}.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
-
 
