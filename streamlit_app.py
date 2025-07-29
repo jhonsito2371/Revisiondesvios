@@ -59,6 +59,7 @@ def extraer_codigo(param):
     return None
 
 df["Código Desvío"] = df["Parámetros"].apply(extraer_codigo)
+df = df[df["Código Desvío"].notna()].copy()
 
 # Instante como datetime
 df["Instante"] = pd.to_datetime(df["Fecha"].astype(str) + " " + df["Instante"].astype(str), errors="coerce")
@@ -127,7 +128,28 @@ cols_finales = [
 df_final = df_final[[c for c in cols_finales if c in df_final.columns]]
 
 # Filtros
+
 with st.expander("🔎 Filtros"):
+    rutas = df_final["Ruta"].dropna().unique().tolist()
+    zonas = df_final["Zona"].dropna().unique().tolist()
+    estados = df_final["Estado Final"].dropna().unique().tolist()
+    tipos_desvio = df_final["Pmt o Desvíos Nuevos"].dropna().unique().tolist()
+    rev_opciones = df_final["Revisión"].dropna().unique().tolist()
+
+    sel_ruta = st.multiselect("Filtrar por Ruta", rutas, default=rutas)
+    sel_zona = st.multiselect("Filtrar por Zona", zonas, default=zonas)
+    sel_estado = st.multiselect("Filtrar por Estado Final", estados, default=estados)
+    sel_tipo = st.multiselect("Filtrar por Tipo de Desvío", tipos_desvio, default=tipos_desvio)
+    sel_rev = st.multiselect("Filtrar por Revisión", rev_opciones, default=rev_opciones)
+
+    df_final = df_final[
+        df_final["Ruta"].isin(sel_ruta) &
+        df_final["Zona"].isin(sel_zona) &
+        df_final["Estado Final"].isin(sel_estado) &
+        df_final["Pmt o Desvíos Nuevos"].isin(sel_tipo) &
+        df_final["Revisión"].isin(sel_rev)
+    ]
+
     rutas = df_final["Ruta"].unique().tolist()
     zonas = df_final["Zona"].unique().tolist()
     estados = df_final["Estado Final"].unique().tolist()
@@ -152,11 +174,10 @@ with col1:
     fig1 = px.pie(df_final, names="Estado Final", title="Distribución de Estado Final")
     st.plotly_chart(fig1, use_container_width=True)
 with col2:
- conteo_revision = df_final["Revisión"].value_counts(dropna=True).reset_index()
+    conteo_revision = df_final["Revisión"].value_counts(dropna=True).reset_index()
 conteo_revision.columns = ["Estado Revisión", "Cantidad"]
 fig2 = px.bar(conteo_revision, x="Estado Revisión", y="Cantidad", title="Revisión por Estado")
-st.plotly_chart(fig2, use_container_width=True)
-
+    st.plotly_chart(fig2, use_container_width=True)
 
 # Descargar Excel
 buffer = BytesIO()
